@@ -13,4 +13,3 @@ src/event.cpp
 src/timer.cpp
 )
 target_link_libraries(MyProject PRIVATE SDL3::SDL3)
-

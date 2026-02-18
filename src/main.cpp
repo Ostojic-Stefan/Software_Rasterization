@@ -1,10 +1,39 @@
 #include "event.hpp"
 #include "framebuffer.hpp"
+#include "renderer.hpp"
 #include "timer.hpp"
 #include "window.hpp"
+#include <numbers>
 #include <print>
 
 static b8 running = true;
+
+struct varying {
+  math::vec4 color;
+  math::vec2 tex_coord;
+};
+
+math::vec4 my_fragment_shader(const void *varyings) {
+  varying vars = *(varying *)varyings;
+  return math::vec4{0.f, 1.f, 0.f, 1.f};
+  // return vars.color;
+}
+
+static void render(renderer &rnd) {
+  math::vec4 coords[3] = {{100.f, 500.f, 1.f, 0.f},  // bottom-left
+                          {500.f, 500.f, 1.f, 0.f},  // bottom-right
+                          {300.f, 100.f, 1.f, 0.f}}; // middle-top
+  varying vars[3] = {
+      varying{.color = {0.f, 0.f, 1.f, 1.f}, .tex_coord = {0.f, 0.f}},
+      varying{.color = {0.f, 1.f, 0.f, 1.f}, .tex_coord = {1.f, 0.f}},
+      varying{.color = {1.f, 0.f, 0.f, 1.f}, .tex_coord = {0.f, 1.f}}};
+
+  // const void *ptrs[3] = {&vars[0], &vars[1], &vars[2]};
+
+  rnd.draw_triangle(coords, vars, sizeof(varying), my_fragment_shader);
+}
+
+static void update(f32 dt) { std::println("FPS = {}", 1.f / dt); }
 
 int main(int argc, char *argv[]) {
 
@@ -24,24 +53,16 @@ int main(int argc, char *argv[]) {
 
   framebuffer fb(800, 600);
 
+  renderer rnd(fb);
+
   struct timer timer;
 
   while (running) {
     wnd.process_events();
 
-    // update
-    std::println("FPS = {}", 1.f / timer.get_elapsed_s());
-
-    // render
-
+    update(timer.get_elapsed_s());
     fb.clear_color(colors::black);
-    for (i32 y = 0; y < fb.get_height(); ++y) {
-      for (i32 x = 0; x < fb.get_width(); ++x) {
-        math::vec4 color = {x / (f32)fb.get_width(), y / (f32)fb.get_height(),
-                            0.f, 1.f};
-        fb.put_pixel(x, y, to_color(color));
-      }
-    }
+    render(rnd);
     wnd.display_framebuffer(fb);
   }
 
