@@ -1,5 +1,6 @@
 #include "event.hpp"
 #include "framebuffer.hpp"
+#include "matrix.hpp"
 #include "renderer.hpp"
 #include "timer.hpp"
 #include "window.hpp"
@@ -7,30 +8,51 @@
 #include <print>
 
 static b8 running = true;
+static f32 total_time;
 
-struct varying {
-  math::vec4 color;
-  math::vec2 tex_coord;
-};
+typedef struct {
+  math::vec3 pos;
+  math::vec4 col;
+} vertex;
 
-math::vec4 my_fragment_shader(const void *varyings) {
-  varying vars = *(varying *)varyings;
-  return math::vec4{0.f, 1.f, 0.f, 1.f};
-  // return vars.color;
+typedef struct {
+  math::vec4 col;
+} varying;
+
+void my_vertex_shader(const void *in, math::vec4 *out_pos, void *out_var) {
+  const vertex *v = (const vertex *)in;
+  varying *var = (varying *)out_var;
+
+  math::mat4 rot = math::mat4::rotation_z(total_time);
+  math::vec4 world_pos = rot * math::vec4(v->pos, 1.f);
+
+  memcpy(out_pos, &world_pos, sizeof(math::vec4));
+  var->col = v->col;
 }
 
-static void render(renderer &rnd) {
-  math::vec4 coords[3] = {{100.f, 500.f, 1.f, 0.f},  // bottom-left
-                          {500.f, 500.f, 1.f, 0.f},  // bottom-right
-                          {300.f, 100.f, 1.f, 0.f}}; // middle-top
-  varying vars[3] = {
-      varying{.color = {0.f, 0.f, 1.f, 1.f}, .tex_coord = {0.f, 0.f}},
-      varying{.color = {0.f, 1.f, 0.f, 1.f}, .tex_coord = {1.f, 0.f}},
-      varying{.color = {1.f, 0.f, 0.f, 1.f}, .tex_coord = {0.f, 1.f}}};
+math::vec4 my_fragment_shader(void *in_var) {
+  varying *var = (varying *)in_var;
 
-  // const void *ptrs[3] = {&vars[0], &vars[1], &vars[2]};
+  return var->col;
+}
 
-  rnd.draw_triangle(coords, vars, sizeof(varying), my_fragment_shader);
+static void render(rendering_pipeline &pipeline) {
+  shader_program program = {.varying_size = sizeof(varying),
+                            .vertex_shader = my_vertex_shader,
+                            .fragment_shader = my_fragment_shader};
+
+  vertex mesh[] = {
+      {math::vec3{-0.5f, -0.5f, 0.f}, math::vec4{1, 0, 0, 1}}, // bottom-left
+      {math::vec3{0.5f, -0.5f, 0.f}, math::vec4{0, 1, 0, 1}},  // bottom-right
+      {math::vec3{-0.5f, 0.5f, 0.f}, math::vec4{0, 0, 1, 1}},  // top-left
+      {math::vec3{0.5f, -0.5f, 0.f}, math::vec4{0, 1, 0, 1}},  // bottom-right
+      {math::vec3{0.5f, 0.5f, 0.f}, math::vec4{0, 0, 1, 1}},   // top-right
+      {math::vec3{-0.5f, 0.5f, 0.f}, math::vec4{0, 0, 1, 1}},  // top-left
+  };
+
+  vertex_buffer vbuf(mesh, sizeof(vertex));
+
+  pipeline.execute_pipeline(&program, vbuf, 6);
 }
 
 static void update(f32 dt) { std::println("FPS = {}", 1.f / dt); }
@@ -53,16 +75,18 @@ int main(int argc, char *argv[]) {
 
   framebuffer fb(800, 600);
 
-  renderer rnd(fb);
+  // renderer rnd(fb);
+  rendering_pipeline pipeline(fb);
 
   struct timer timer;
 
   while (running) {
     wnd.process_events();
-
-    update(timer.get_elapsed_s());
+    f32 dt = timer.get_elapsed_s();
+    total_time += dt;
+    update(dt);
     fb.clear_color(colors::black);
-    render(rnd);
+    render(pipeline);
     wnd.display_framebuffer(fb);
   }
 

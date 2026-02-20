@@ -1,79 +1,125 @@
 #pragma once
 
+#include "buffer.hpp"
 #include "framebuffer.hpp"
 #include "math_util.hpp"
+#include "shader_program.hpp"
+#include "varying.hpp"
 #include "vector.hpp"
+#include <array>
 #include <memory>
 
-typedef math::vec4 (*fragment_shader)(const void *vars);
+struct viewport {
+  std::int32_t xmin, ymin, xmax, ymax;
 
-inline void interpolate_vars(const void *src_vars, void *dst_vars,
-                             i32 vars_size, math::vec3 weights) {
+  /// <summary>
+  /// Transforms the point specified in NDC Space (0,0) is middle,
+  /// to the range specified by the bounds (xmin, ymin, xmax, ymax)
+  /// </summary>
+  /// <param name="pt">The point that will be transformed</param>
+  /// <returns>The Transformed point</returns>
+  math::vec4 transform(math::vec4 pt) const {
+    pt.x = xmin + (xmax - xmin) * (0.5f + 0.5f * pt.x);
+    pt.y = ymin + (ymax - ymin) * (0.5f - 0.5f * pt.y);
+    return pt;
+  }
 
-  size num_floats_per_vertex = (vars_size) / sizeof(float);
-  // size num_floats = vars_size / sizeof(float);
-  f32 *src0 = (f32 *)src_vars;
-  f32 *src1 = (f32 *)((u8 *)src_vars + vars_size);
-  f32 *src2 = (f32 *)((u8 *)src_vars + 2 * vars_size);
-  f32 *dst = (f32 *)dst_vars;
+  f32 get_aspect_wh() const { return (xmax - xmin) / f32(ymax - ymin); }
+  f32 get_aspect_hw() const { return (ymax - ymin) / f32(xmax - xmin); }
+};
 
-  for (i32 i = 0; i < num_floats_per_vertex; ++i) {
-    f32 sum = src0[i] * weights.x + src1[i] * weights.y + src2[i] * weights.z;
-    dst[i] = sum;
+static void draw_triangle(framebuffer &fb, shader_program *program,
+                          math::vec4 positions[3],
+                          void *varyings) // packed: v0|v1|v2
+{
+  f32 area = math::det_2d(math::vec4{positions[1].x - positions[0].x,
+                                     positions[1].y - positions[0].y, 0, 0},
+                          math::vec4{positions[2].x - positions[0].x,
+                                     positions[2].y - positions[0].y, 0, 0});
+
+  if (area == 0.0f)
+    return;
+
+  f32 inv_area = 1.f / area;
+
+  i32 xmin = (i32)fminf(fminf(positions[0].x, positions[1].x), positions[2].x);
+  i32 xmax = (i32)fmaxf(fmaxf(positions[0].x, positions[1].x), positions[2].x);
+  i32 ymin = (i32)fminf(fminf(positions[0].y, positions[1].y), positions[2].y);
+  i32 ymax = (i32)fmaxf(fmaxf(positions[0].y, positions[1].y), positions[2].y);
+
+  u8 interp_buffer[256];
+  if (program->varying_size > sizeof(interp_buffer))
+    return;
+
+  for (i32 y = ymin; y <= ymax; ++y) {
+    for (i32 x = xmin; x <= xmax; ++x) {
+      math::vec4 p = {x + 0.5f, y + 0.5f, 0, 0};
+
+      f32 w0 = math::det_2d(
+          (math::vec4){positions[2].x - positions[1].x,
+                       positions[2].y - positions[1].y, 0, 0},
+          (math::vec4){p.x - positions[1].x, p.y - positions[1].y, 0, 0});
+
+      f32 w1 = math::det_2d(
+          (math::vec4){positions[0].x - positions[2].x,
+                       positions[0].y - positions[2].y, 0, 0},
+          (math::vec4){p.x - positions[2].x, p.y - positions[2].y, 0, 0});
+
+      f32 w2 = math::det_2d(
+          (math::vec4){positions[1].x - positions[0].x,
+                       positions[1].y - positions[0].y, 0, 0},
+          (math::vec4){p.x - positions[0].x, p.y - positions[0].y, 0, 0});
+
+      if (w0 > 0 || w1 > 0 || w2 > 0)
+        continue;
+
+      math::vec3 bary = {w0 * inv_area, w1 * inv_area, w2 * inv_area};
+
+      interpolate_vars(varyings, interp_buffer, program->varying_size, bary);
+
+      math::vec4 color = program->fragment_shader(interp_buffer);
+
+      fb.put_pixel(x, y, to_color(color));
+    }
   }
 }
 
-struct renderer {
-  renderer(framebuffer &fb) : fb(fb) {}
+struct rendering_pipeline {
 
-  void draw_triangle(math::vec4 clip_coords[3], const void *varyings,
-                     size varyings_size, fragment_shader fs) {
+  rendering_pipeline(framebuffer &fb) : fb(fb) {
+    // todo: un-hardcode
+    vp = {0, 0, 800, 600};
+  }
 
-    f32 area = math::det_2d(clip_coords[1] - clip_coords[0],
-                            clip_coords[2] - clip_coords[0]);
-    f32 rcp_area = 1.f / area;
+  void execute_pipeline(shader_program *program, vertex_buffer vbuf,
+                        i32 vertex_count) {
 
-    i32 xmin =
-        (i32)std::min({clip_coords[0].x, clip_coords[1].x, clip_coords[2].x});
-    i32 xmax =
-        (i32)std::max({clip_coords[0].x, clip_coords[1].x, clip_coords[2].x});
-    i32 ymin =
-        (i32)std::min({clip_coords[0].y, clip_coords[1].y, clip_coords[2].y});
-    i32 ymax =
-        (i32)std::max({clip_coords[0].y, clip_coords[1].y, clip_coords[2].y});
+    assert(vertex_count % 3 == 0);
+    size n_triangles = vertex_count / 3;
 
-    // void *out_vars = std::malloc(10 * sizeof(f32));
+    // for each triangle...
+    for (size tri = 0; tri < n_triangles; ++tri) {
+      u8 vars[3 * 256];
+      std::array<math::vec4, 3> positions;
 
-    for (i32 y = ymin; y <= ymax; ++y) {
-      for (i32 x = xmin; x <= xmax; ++x) {
-        math::vec4 p = {x + 0.5f, y + 0.5f, 0.f, 1.f};
-        f32 det01p =
-            math::det_2d(clip_coords[1] - clip_coords[0], p - clip_coords[0]);
-        f32 det12p =
-            math::det_2d(clip_coords[2] - clip_coords[1], p - clip_coords[1]);
-        f32 det20p =
-            math::det_2d(clip_coords[0] - clip_coords[2], p - clip_coords[2]);
+      assert(program->varying_size < 256);
 
-        // todo: flip the signs when we flip the coordinate system to the
-        // version
-        if (det01p > 0.f || det12p > 0.f || det20p > 0.f)
-          continue;
+      for (size v = 0; v < 3; ++v) {
+        void *vtx_ptr = vbuf.data + (tri * 3 + v) * vbuf.stride;
 
-        f32 alpha = det12p * rcp_area;
-        f32 beta = det20p * rcp_area;
-        f32 gamma = det01p * rcp_area;
+        void *out_vars = vars + v * program->varying_size;
 
-        char out_vars[512];
-        interpolate_vars(varyings, out_vars, varyings_size,
-                         math::vec3{alpha, beta, gamma});
+        program->vertex_shader(vtx_ptr, &positions[v], out_vars);
 
-        math::vec4 final_color = fs(out_vars);
-
-        fb.put_pixel(x, y, to_color(final_color));
+        positions[v].x *= vp.get_aspect_hw();
+        positions[v] = vp.transform(positions[v]);
       }
+
+      draw_triangle(fb, program, positions.data(), vars);
     }
   }
 
 private:
   framebuffer &fb;
+  viewport vp;
 };
